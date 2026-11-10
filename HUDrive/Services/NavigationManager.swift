@@ -21,6 +21,8 @@ class NavigationManager: ObservableObject {
     @Published var isCalculatingRoute: Bool = false
     @Published var destination: MKMapItem?
     @Published var errorMessage: String?
+    /// Set when the user adds a stop mid-route. After arriving at the stop, navigate here.
+    @Published var pendingDestination: MKMapItem?
     
     // MARK: - Dependencies
     private let locationManager: LocationManager
@@ -81,6 +83,16 @@ class NavigationManager: ObservableObject {
     func recalculateRoute() {
         guard let dest = destination else { return }
         calculateRoute(to: dest)
+    }
+
+    /// Add an intermediate stop. Saves the current destination as pending,
+    /// then navigates to the stop. When the user ends navigation at the stop,
+    /// pendingDestination will hold the original final destination.
+    func addStop(_ stop: MKMapItem) {
+        if destination != nil {
+            pendingDestination = destination
+        }
+        startNavigation(to: stop)
     }
     
     // MARK: - Route Calculation

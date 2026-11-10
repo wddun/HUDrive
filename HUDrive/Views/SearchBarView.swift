@@ -10,22 +10,22 @@ import Combine
 struct SearchBarView: View {
     @ObservedObject var navigationManager: NavigationManager
     @ObservedObject var locationManager: LocationManager
-    
+
     @StateObject private var searchCompleter = SearchCompleterManager()
     @State private var searchText: String = ""
-    @State private var isSearching: Bool = false
     @FocusState private var isSearchFieldFocused: Bool
-    
+
     var onDismiss: () -> Void
-    
+
     var body: some View {
+        // Constrained to portrait width so it never stretches sideways
         VStack(spacing: 0) {
             // Search field
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(.white.opacity(0.5))
-                
+
                 TextField("Search destination", text: $searchText)
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(.white)
@@ -35,7 +35,7 @@ struct SearchBarView: View {
                     .onChange(of: searchText) { _, newValue in
                         searchCompleter.search(query: newValue)
                     }
-                
+
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
@@ -46,7 +46,7 @@ struct SearchBarView: View {
                             .foregroundColor(.white.opacity(0.5))
                     }
                 }
-                
+
                 Button {
                     onDismiss()
                 } label: {
@@ -57,14 +57,14 @@ struct SearchBarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(Color.white.opacity(0.08))
+            .background(Color.white.opacity(0.1))
             .cornerRadius(12)
             .padding(.horizontal, 16)
-            .padding(.top, 12)
-            
-            // Results list
+            .padding(.top, 16)
+
+            // Results list — vertical scroll only, no horizontal bounce
             if !searchCompleter.results.isEmpty {
-                ScrollView {
+                ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: 0) {
                         ForEach(searchCompleter.results, id: \.self) { result in
                             Button {
@@ -74,13 +74,13 @@ struct SearchBarView: View {
                                     Image(systemName: "mappin.circle.fill")
                                         .font(.system(size: 22))
                                         .foregroundColor(.cyan.opacity(0.8))
-                                    
+
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(result.title)
                                             .font(.system(size: 16, weight: .semibold))
                                             .foregroundColor(.white)
                                             .lineLimit(1)
-                                        
+
                                         if !result.subtitle.isEmpty {
                                             Text(result.subtitle)
                                                 .font(.system(size: 13))
@@ -88,9 +88,9 @@ struct SearchBarView: View {
                                                 .lineLimit(1)
                                         }
                                     }
-                                    
+
                                     Spacer()
-                                    
+
                                     Image(systemName: "arrow.right.circle")
                                         .font(.system(size: 18))
                                         .foregroundColor(.white.opacity(0.3))
@@ -98,31 +98,34 @@ struct SearchBarView: View {
                                 .padding(.horizontal, 20)
                                 .padding(.vertical, 12)
                             }
-                            
+
                             Divider()
                                 .background(Color.white.opacity(0.08))
                                 .padding(.leading, 56)
                         }
                     }
                 }
-                .frame(maxHeight: 300)
-                .background(Color.black.opacity(0.85))
+                .frame(maxHeight: 320)
+                // Prevent any horizontal movement
+                .frame(maxWidth: .infinity)
+                .background(Color.black.opacity(0.92))
                 .cornerRadius(12)
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
+                // Disable horizontal over-scroll
+                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }
-            
+
             if navigationManager.isCalculatingRoute {
                 HStack(spacing: 10) {
-                    ProgressView()
-                        .tint(.cyan)
-                    Text("Calculating route...")
+                    ProgressView().tint(.cyan)
+                    Text("Calculating route…")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.white.opacity(0.7))
                 }
                 .padding(.top, 16)
             }
-            
+
             if let error = navigationManager.errorMessage {
                 Text(error)
                     .font(.system(size: 14, weight: .medium))
@@ -131,19 +134,17 @@ struct SearchBarView: View {
                     .padding(.horizontal, 16)
             }
         }
+        // Keep the whole search panel within the screen width — no sideways spill
+        .frame(maxWidth: .infinity)
         .onAppear {
             isSearchFieldFocused = true
         }
     }
-    
+
     private func selectResult(_ result: MKLocalSearchCompletion) {
-        // Resolve the completion to a map item
         let request = MKLocalSearch.Request(completion: result)
-        let search = MKLocalSearch(request: request)
-        
-        search.start { response, error in
+        MKLocalSearch(request: request).start { response, _ in
             guard let mapItem = response?.mapItems.first else { return }
-            
             DispatchQueue.main.async {
                 searchText = ""
                 searchCompleter.results = []
@@ -160,25 +161,22 @@ struct SearchBarView: View {
 class SearchCompleterManager: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
     private let completer = MKLocalSearchCompleter()
     @Published var results: [MKLocalSearchCompletion] = []
-    
+
     override init() {
         super.init()
         completer.delegate = self
         completer.resultTypes = [.address, .pointOfInterest]
     }
-    
+
     func search(query: String) {
-        if query.isEmpty {
-            results = []
-            return
-        }
+        if query.isEmpty { results = []; return }
         completer.queryFragment = query
     }
-    
+
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
         results = completer.results
     }
-    
+
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
         print("Search completer error: \(error.localizedDescription)")
     }

@@ -8,54 +8,64 @@ import MapKit
 import Combine
 
 struct ContentView: View {
-    @StateObject private var locationManager = LocationManager()
-    @StateObject private var voiceGuidance = VoiceGuidanceService()
-    @State private var navigationManager: NavigationManager?
-    
-    @State private var showSearch = false
-    @State private var showControls = true
+    // All managers come from the shared singleton so CarPlay sees the same state.
+    @ObservedObject private var locationManager   = AppState.shared.locationManager
+    @ObservedObject private var voiceGuidance     = AppState.shared.voiceGuidance
+    @ObservedObject private var navigationManager = AppState.shared.navigationManager
+
+    @State private var showSearch    = false
+    @State private var showControls  = true
+    @State private var showLetsDrive = false
     @State private var controlsTimer: Timer?
-    
+
     var body: some View {
-        Group {
-            if let navManager = navigationManager {
-                mainContent(navManager: navManager)
-            } else {
-                Color.black
-                    .overlay(
-                        ProgressView()
-                            .tint(.cyan)
-                    )
+        mainContent
+            .onAppear {
+                UIApplication.shared.isIdleTimerDisabled = true
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                    scene.screen.brightness = 1.0
+                }
+                locationManager.requestAuthorization()
+                OrientationManager.allowPortrait()
+                resetControlsTimer()
             }
-        }
-        .onAppear {
-            let navManager = NavigationManager(
-                locationManager: locationManager,
-                voiceGuidance: voiceGuidance
-            )
-            navigationManager = navManager
-            locationManager.requestAuthorization()
-            // Start in portrait-friendly mode
-            OrientationManager.allowPortrait()
-        }
-        .preferredColorScheme(.dark)
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
+            .onDisappear {
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+            .preferredColorScheme(.dark)
+            .statusBarHidden(true)
+            .persistentSystemOverlays(.hidden)
+            // Lock landscape when navigation starts, portrait when it stops
+            .onChange(of: navigationManager.isNavigating) { _, isNavigating in
+                if isNavigating {
+                    OrientationManager.lockLandscape()
+                } else {
+                    OrientationManager.allowPortrait()
+                }
+            }
+            // Show "Let's Drive" when the route first loads
+            .onChange(of: navigationManager.route) { _, newRoute in
+                if newRoute != nil && navigationManager.isNavigating && !showLetsDrive {
+                    withAnimation(.easeIn(duration: 0.25)) { showLetsDrive = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+                        withAnimation(.easeOut(duration: 0.45)) { showLetsDrive = false }
+                    }
+                }
+            }
     }
-    
+
+    // MARK: - Main layout
+
     @ViewBuilder
-    private func mainContent(navManager: NavigationManager) -> some View {
+    private var mainContent: some View {
         ZStack {
-            // Main content layer (flipped only when navigating in landscape)
+            // ── Map layer (flipped when navigating in HUD mode) ──
             Group {
-                if navManager.isNavigating && !showSearch {
-                    // NAVIGATING: Side-by-side layout (landscape)
+                if navigationManager.isNavigating && !showSearch {
                     HStack(spacing: 0) {
-                        // LEFT: Big turn-by-turn panel
-                        NavigationBannerView(navigationManager: navManager)
+                        NavigationBannerView(navigationManager: navigationManager)
                             .frame(width: UIScreen.main.bounds.width * 0.35)
-                        
-                        // Gradient transition edge
+
                         LinearGradient(
                             colors: [.black, .clear],
                             startPoint: .leading,
@@ -63,78 +73,75 @@ struct ContentView: View {
                         )
                         .frame(width: 30)
                         .allowsHitTesting(false)
-                        
-                        // RIGHT: Map with dark overlay + info bar at top
+
                         ZStack(alignment: .top) {
                             MapViewRepresentable(
                                 locationManager: locationManager,
-                                navigationManager: navManager
+                                navigationManager: navigationManager
                             )
-                            
-                            // Dark filter overlay to dim the map
+
                             Color.black.opacity(0.45)
                                 .allowsHitTesting(false)
-                            
-                            // ETA / Time / Distance at the top of the map
-                            NavigationInfoBar(navigationManager: navManager)
+
+                            NavigationInfoBar(navigationManager: navigationManager)
                         }
                     }
                     .ignoresSafeArea()
                 } else {
-                    // NOT NAVIGATING / SEARCHING: Full map (portrait or landscape)
                     ZStack {
                         MapViewRepresentable(
                             locationManager: locationManager,
-                            navigationManager: navManager
+                            navigationManager: navigationManager
                         )
                         .ignoresSafeArea()
-                        
+
                         Color.black.opacity(0.3)
                             .ignoresSafeArea()
                             .allowsHitTesting(false)
                     }
                 }
             }
-            // HUD MIRROR FLIP — only when navigating and search is closed
             .rotation3DEffect(
-                .degrees(navManager.isNavigating && !showSearch ? 180 : 0),
+                .degrees(navigationManager.isNavigating && !showSearch ? 180 : 0),
                 axis: (x: 0, y: 1, z: 0)
             )
-            .animation(.easeInOut(duration: 0.4), value: navManager.isNavigating && !showSearch)
-            
-            // Speed display when not navigating (not flipped)
-            if !navManager.isNavigating {
+            .animation(.easeInOut(duration: 0.4),
+                       value: navigationManager.isNavigating && !showSearch)
+
+            // Speed display (portrait / not navigating)
+            if !navigationManager.isNavigating {
                 VStack {
                     Spacer()
                     SpeedDisplayView(speed: locationManager.speed)
                         .padding(.bottom, 40)
                 }
             }
-            
-            // Controls overlay (not flipped)
+
+            // Controls overlay
             if showControls && !showSearch {
-                controlsOverlay(navManager: navManager)
+                controlsOverlay
             }
-            
-            // Search overlay (not flipped, works in portrait)
+
+            // ── Search overlay ──
             if showSearch {
-                Color.black.opacity(0.6)
+                // Opaque backdrop so map/HUD behind is barely visible
+                Color.black.opacity(0.92)
                     .ignoresSafeArea()
-                    .onTapGesture {
-                        dismissSearch(navManager: navManager)
-                    }
-                
-                SearchBarView(
-                    navigationManager: navManager,
-                    locationManager: locationManager,
-                    onDismiss: {
-                        dismissSearch(navManager: navManager)
-                    }
-                )
+                    .onTapGesture { dismissSearch() }
+
+                // Search UI pinned to the top
+                VStack {
+                    SearchBarView(
+                        navigationManager: navigationManager,
+                        locationManager: locationManager,
+                        onDismiss: { dismissSearch() }
+                    )
+                    Spacer()
+                }
             }
-            
-            // Error display (not flipped)
-            if let error = navManager.errorMessage, !showSearch {
+
+            // Error banner
+            if let error = navigationManager.errorMessage, !showSearch {
                 VStack {
                     Spacer()
                     Text(error)
@@ -147,82 +154,48 @@ struct ContentView: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+
+            // ── "Let's Drive" overlay ──
+            if showLetsDrive {
+                LetsdriveView(destinationName: navigationManager.destination?.name ?? "")
+                    .zIndex(100)
+                    .allowsHitTesting(false)
+            }
         }
         .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                showControls.toggle()
-            }
+            withAnimation(.easeInOut(duration: 0.3)) { showControls.toggle() }
             resetControlsTimer()
         }
-        .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                scene.screen.brightness = 1.0
-            }
-            resetControlsTimer()
-        }
-        .onDisappear {
-            UIApplication.shared.isIdleTimerDisabled = false
-        }
-        // React to navigation state changes for orientation
-        .onChange(of: navManager.isNavigating) { _, isNavigating in
-            if isNavigating {
-                OrientationManager.lockLandscape()
-            } else {
-                OrientationManager.allowPortrait()
-            }
-        }
     }
-    
-    private func showSearchOverlay() {
-        // Allow portrait when searching
-        OrientationManager.allowPortrait()
-        withAnimation {
-            showSearch = true
-        }
-    }
-    
-    private func dismissSearch(navManager: NavigationManager) {
-        withAnimation {
-            showSearch = false
-        }
-        // If navigating, go back to landscape
-        if navManager.isNavigating {
-            OrientationManager.lockLandscape()
-        }
-    }
-    
+
+    // MARK: - Controls
+
     @ViewBuilder
-    private func controlsOverlay(navManager: NavigationManager) -> some View {
+    private var controlsOverlay: some View {
         VStack {
             HStack {
                 Spacer()
-                
                 VStack(spacing: 12) {
-                    // Search / New destination
                     controlButton(icon: "magnifyingglass", color: .cyan) {
                         showSearchOverlay()
                     }
-                    
-                    // Voice toggle
+
                     controlButton(
                         icon: voiceGuidance.isEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
                         color: voiceGuidance.isEnabled ? .cyan : .white.opacity(0.5)
                     ) {
                         voiceGuidance.isEnabled.toggle()
                     }
-                    
-                    // End navigation
-                    if navManager.isNavigating {
+
+                    if navigationManager.isNavigating {
                         controlButton(icon: "xmark", color: .red) {
-                            navManager.stopNavigation()
+                            navigationManager.stopNavigation()
                             OrientationManager.allowPortrait()
                         }
                     }
-                    
-                    // Recenter map
+
                     controlButton(icon: "location.fill", color: .white.opacity(0.7)) {
-                        navManager.objectWillChange.send()
+                        navigationManager.objectWillChange.send()
                     }
                 }
                 .padding(.trailing, 16)
@@ -232,7 +205,7 @@ struct ContentView: View {
         }
         .transition(.opacity)
     }
-    
+
     private func controlButton(icon: String, color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
@@ -242,20 +215,34 @@ struct ContentView: View {
                 .background(
                     Circle()
                         .fill(Color.black.opacity(0.7))
-                        .overlay(
-                            Circle()
-                                .stroke(color.opacity(0.3), lineWidth: 1)
-                        )
+                        .overlay(Circle().stroke(color.opacity(0.3), lineWidth: 1))
                 )
         }
     }
-    
+
+    // MARK: - Search helpers
+
+    private func showSearchOverlay() {
+        // Lock to portrait so the keyboard/search can't be used sideways
+        OrientationManager.lockPortrait()
+        withAnimation { showSearch = true }
+    }
+
+    private func dismissSearch() {
+        withAnimation { showSearch = false }
+        if navigationManager.isNavigating {
+            OrientationManager.lockLandscape()
+        } else {
+            OrientationManager.allowPortrait()
+        }
+    }
+
+    // MARK: - Timer
+
     private func resetControlsTimer() {
         controlsTimer?.invalidate()
         controlsTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
-            withAnimation(.easeInOut(duration: 0.3)) {
-                showControls = false
-            }
+            withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
         }
     }
 }
